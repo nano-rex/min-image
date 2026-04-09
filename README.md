@@ -30,6 +30,20 @@ sudo pacman -S libjxl
 
 ## Build and run
 
+Prerequisites:
+
+- Rust toolchain with `cargo`
+- `libjxl-tools` for JXL support
+- GTK and native GUI dependencies required by `eframe`/`egui` on your distro
+
+Build:
+
+```bash
+cargo build --release
+```
+
+Run:
+
 ```bash
 cargo run --release -- /path/to/image.png
 ```
