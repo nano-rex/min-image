@@ -148,9 +148,10 @@ impl ViewerApp {
 
     fn render_folder_browser(&mut self, ctx: &egui::Context) {
         let mut selected_index = None;
+        let mut open = self.show_browser;
 
         egui::Window::new("Folder Browser")
-            .open(&mut self.show_browser)
+            .open(&mut open)
             .default_size([900.0, 640.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -173,12 +174,11 @@ impl ViewerApp {
                                 for (idx, path) in paths.iter().enumerate() {
                                     ui.group(|ui| {
                                         if let Some(texture) = self.thumbnail_texture(path, ctx) {
-                                            if ui
-                                                .add(egui::ImageButton::new((
-                                                    texture.id(),
-                                                    egui::vec2(128.0, 128.0),
-                                                )))
-                                                .clicked()
+                                            let image = egui::Image::new((
+                                                texture.id(),
+                                                egui::vec2(128.0, 128.0),
+                                            ));
+                                            if ui.add(egui::ImageButton::new(image)).clicked()
                                             {
                                                 selected_index = Some(idx);
                                             }
@@ -231,8 +231,10 @@ impl ViewerApp {
 
         if let Some(idx) = selected_index {
             self.select_index(idx, ctx);
-            self.show_browser = false;
+            open = false;
         }
+
+        self.show_browser = open;
     }
 
     fn render_image_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
