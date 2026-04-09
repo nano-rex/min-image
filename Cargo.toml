@@ -1,0 +1,12 @@
+[package]
+name = "minimal-image-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+eframe = "0.30"
+egui = "0.30"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rfd = "0.15"
+tempfile = "3"
