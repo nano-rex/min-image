@@ -9,6 +9,8 @@ A minimal Linux image viewer written in Rust.
 - Sidebar for file selection.
 - `Prev` / `Next` buttons and left/right arrow key navigation.
 - Scales image to fit the window.
+- Zoom with mouse wheel and pan by dragging.
+- `Browse Folder` window with icon mode and list mode, both showing thumbnails.
 
 ## JXL support
 

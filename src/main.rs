@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use eframe::egui::{self, Key, TextureHandle};
+use eframe::egui::{self, Key, TextureHandle, Vec2};
 
 fn main() -> Result<()> {
     let initial_image = std::env::args().nth(1).map(PathBuf::from);
@@ -23,12 +24,30 @@ fn main() -> Result<()> {
     .map_err(|err| anyhow!("failed to start UI: {err}"))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserLayout {
+    Icons,
+    List,
+}
+
+impl Default for BrowserLayout {
+    fn default() -> Self {
+        Self::Icons
+    }
+}
+
 #[derive(Default)]
 struct ViewerApp {
     current_dir: Option<PathBuf>,
     images: Vec<PathBuf>,
     current_index: usize,
     texture: Option<TextureHandle>,
+    thumbnails: HashMap<PathBuf, TextureHandle>,
+    show_browser: bool,
+    browser_layout: BrowserLayout,
+    zoom: f32,
+    pan: Vec2,
+    fit_to_window: bool,
     error: Option<String>,
 }
 
@@ -48,6 +67,10 @@ impl ViewerApp {
             .parent()
             .ok_or_else(|| anyhow!("selected path has no parent"))?
             .to_path_buf();
+
+        if self.current_dir.as_ref() != Some(&dir) {
+            self.thumbnails.clear();
+        }
 
         self.images = list_images(&dir)?;
         let index = self
@@ -76,7 +99,20 @@ impl ViewerApp {
         let color = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba.as_raw());
         let name = format!("image:{}", path.display());
         self.texture = Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR));
+
+        self.zoom = 1.0;
+        self.pan = Vec2::ZERO;
+        self.fit_to_window = true;
         Ok(())
+    }
+
+    fn select_index(&mut self, index: usize, ctx: &egui::Context) {
+        self.current_index = index;
+        if let Err(err) = self.load_current_texture(ctx) {
+            self.error = Some(err.to_string());
+        } else {
+            self.error = None;
+        }
     }
 
     fn select_relative(&mut self, delta: isize, ctx: &egui::Context) {
@@ -87,11 +123,161 @@ impl ViewerApp {
         let len = self.images.len() as isize;
         let current = self.current_index as isize;
         let next = (current + delta).rem_euclid(len) as usize;
-        self.current_index = next;
-        if let Err(err) = self.load_current_texture(ctx) {
-            self.error = Some(err.to_string());
+        self.select_index(next, ctx);
+    }
+
+    fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom.clamp(0.05, 20.0);
+        self.fit_to_window = false;
+    }
+
+    fn thumbnail_texture(&mut self, path: &Path, ctx: &egui::Context) -> Option<TextureHandle> {
+        if let Some(texture) = self.thumbnails.get(path) {
+            return Some(texture.clone());
+        }
+
+        let thumbnail = decode_image(path).ok()?.thumbnail(160, 160).to_rgba8();
+        let width = usize::try_from(thumbnail.width()).ok()?;
+        let height = usize::try_from(thumbnail.height()).ok()?;
+        let color = egui::ColorImage::from_rgba_unmultiplied([width, height], thumbnail.as_raw());
+        let name = format!("thumb:{}", path.display());
+        let texture = ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
+        self.thumbnails.insert(path.to_path_buf(), texture.clone());
+        Some(texture)
+    }
+
+    fn render_folder_browser(&mut self, ctx: &egui::Context) {
+        let mut selected_index = None;
+
+        egui::Window::new("Folder Browser")
+            .open(&mut self.show_browser)
+            .default_size([900.0, 640.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Layout:");
+                    ui.selectable_value(&mut self.browser_layout, BrowserLayout::Icons, "Icon mode");
+                    ui.selectable_value(&mut self.browser_layout, BrowserLayout::List, "List mode");
+                });
+                ui.separator();
+
+                if self.images.is_empty() {
+                    ui.label("No supported images in this folder.");
+                    return;
+                }
+
+                match self.browser_layout {
+                    BrowserLayout::Icons => {
+                        let paths = self.images.clone();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for (idx, path) in paths.iter().enumerate() {
+                                    ui.group(|ui| {
+                                        if let Some(texture) = self.thumbnail_texture(path, ctx) {
+                                            if ui
+                                                .add(egui::ImageButton::new((
+                                                    texture.id(),
+                                                    egui::vec2(128.0, 128.0),
+                                                )))
+                                                .clicked()
+                                            {
+                                                selected_index = Some(idx);
+                                            }
+                                        } else if ui.button("[preview unavailable]").clicked() {
+                                            selected_index = Some(idx);
+                                        }
+
+                                        let name = path
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| path.display().to_string());
+                                        ui.label(name);
+                                    });
+                                }
+                            });
+                        });
+                    }
+                    BrowserLayout::List => {
+                        let paths = self.images.clone();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (idx, path) in paths.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if let Some(texture) = self.thumbnail_texture(path, ctx) {
+                                        ui.add(egui::Image::new((texture.id(), egui::vec2(64.0, 64.0))));
+                                    } else {
+                                        ui.label("[no thumb]");
+                                    }
+
+                                    let name = path
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| path.display().to_string());
+
+                                    let label = if idx == self.current_index {
+                                        format!("> {name}")
+                                    } else {
+                                        name
+                                    };
+
+                                    if ui.button(label).clicked() {
+                                        selected_index = Some(idx);
+                                    }
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+                }
+            });
+
+        if let Some(idx) = selected_index {
+            self.select_index(idx, ctx);
+            self.show_browser = false;
+        }
+    }
+
+    fn render_image_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(texture) = self.texture.clone() {
+            let available = ui.available_size();
+            let (canvas_rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
+
+            if response.hovered() {
+                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                if scroll.abs() > f32::EPSILON {
+                    let factor = (scroll / 300.0).exp();
+                    self.set_zoom(self.zoom * factor);
+                }
+            }
+
+            if response.dragged() {
+                self.fit_to_window = false;
+                self.pan += ctx.input(|i| i.pointer.delta());
+            }
+
+            let image_size = texture.size_vec2();
+            if self.fit_to_window {
+                let fit = (canvas_rect.width() / image_size.x)
+                    .min(canvas_rect.height() / image_size.y)
+                    .max(0.01);
+                self.zoom = fit;
+                self.pan = Vec2::ZERO;
+            }
+
+            let displayed = image_size * self.zoom;
+            let top_left = canvas_rect.center() - displayed * 0.5 + self.pan;
+            let image_rect = egui::Rect::from_min_size(top_left, displayed);
+
+            let painter = ui.painter_at(canvas_rect);
+            painter.rect_filled(canvas_rect, 0.0, egui::Color32::BLACK);
+            painter.image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         } else {
-            self.error = None;
+            ui.centered_and_justified(|ui| {
+                ui.label("Open a PNG, JPEG, or JXL image.");
+            });
         }
     }
 }
@@ -123,7 +309,25 @@ impl eframe::App for ViewerApp {
                     self.select_relative(1, ctx);
                 }
 
+                if ui.button("Zoom +").clicked() {
+                    self.set_zoom(self.zoom * 1.25);
+                }
+                if ui.button("Zoom -").clicked() {
+                    self.set_zoom(self.zoom / 1.25);
+                }
+                if ui.button("Fit").clicked() {
+                    self.fit_to_window = true;
+                }
+
+                if ui.button("Browse Folder").clicked() {
+                    self.show_browser = true;
+                }
+
+                ui.separator();
+                ui.label("Wheel: zoom, Drag: pan");
+
                 if let Some(current) = self.images.get(self.current_index) {
+                    ui.separator();
                     ui.label(current.display().to_string());
                 }
             });
@@ -152,34 +356,18 @@ impl eframe::App for ViewerApp {
                         }
                     }
                     if let Some(idx) = clicked_index {
-                        self.current_index = idx;
-                        if let Err(err) = self.load_current_texture(ctx) {
-                            self.error = Some(err.to_string());
-                        } else {
-                            self.error = None;
-                        }
+                        self.select_index(idx, ctx);
                     }
                 });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(texture) = &self.texture {
-                let available = ui.available_size();
-                let image_size = texture.size_vec2();
-                let scale = (available.x / image_size.x)
-                    .min(available.y / image_size.y)
-                    .max(0.01);
-                let desired = image_size * scale;
-
-                ui.vertical_centered(|ui| {
-                    ui.add(egui::Image::new((texture.id(), desired)));
-                });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Open a PNG, JPEG, or JXL image.");
-                });
-            }
+            self.render_image_canvas(ui, ctx);
         });
+
+        if self.show_browser {
+            self.render_folder_browser(ctx);
+        }
     }
 }
 
